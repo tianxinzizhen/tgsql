@@ -21,9 +21,6 @@ func RegisterScanVal[T any](sv ScanVal[T]) error {
 	if _, ok := localScanVal[reflect.TypeFor[T]()]; ok {
 		return fmt.Errorf("sv.ScanValue() type already registered")
 	}
-	if _, ok := localScanVal[reflect.TypeFor[T]()]; ok {
-		return fmt.Errorf("sv.ScanValue() type already registered")
-	}
 	if _, ok := localScanVal[reflect.TypeFor[*T]()]; ok {
 		return fmt.Errorf("sv.ScanValuePtr() type already registered")
 	}

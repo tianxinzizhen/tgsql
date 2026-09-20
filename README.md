@@ -1,17 +1,16 @@
-# tgsql - Go语言SQL模板库
+# tgsql
 
-`tgsql` 是一个强大的Go语言SQL模板库，它允许您使用模板动态生成SQL语句，并原生支持Go语言的数据库操作接口，您可以直接使用它来执行SQL语句。
+[![Go Reference](https://pkg.go.dev/badge/github.com/tianxinzizhen/tgsql.svg)](https://pkg.go.dev/github.com/tianxinzizhen/tgsql)
 
-## 特性
+`tgsql` 是一个 Go 语言 SQL 模板库。你可以用类 Go template 的语法在注释里写 SQL，运行时它会自动完成：
 
-- ✅ 动态SQL生成：使用模板语法动态生成SQL语句
-- ✅ 原生数据库支持：直接兼容Go标准库的`database/sql`接口
-- ✅ 多种参数引用方式：支持常量、模板操作符和占位符
-- ✅ 丰富的模板函数：提供like、in、set、where等实用函数
-- ✅ 可选条件支持：使用方括号[]轻松处理可选SQL条件
-- ✅ JSON支持：内置JSON序列化函数
-- ✅ 自定义模板函数：支持扩展自定义模板函数
-- ✅ SQL日志：内置SQL执行日志功能
+- 预处理：把 `{user_name}` 按列名转字段名、`like ?` 自动包 `%value%`、方括号变可选条件
+- 模板渲染：用 Go `text/template` 的 `Funcs → Parse` 顺序安全执行
+- 结果扫描：把 `*sql.Rows` 里的列自动映射到 struct / slice / map / 单值
+
+仅依赖 `database/sql` 和 `github.com/go-sql-driver/mysql`（MySQL 驱动可选，其他驱动也能用）。
+
+---
 
 ## 安装
 
@@ -19,183 +18,21 @@
 go get github.com/tianxinzizhen/tgsql
 ```
 
+Go 版本：>= 1.23
+
+---
+
 ## 快速开始
 
-### 初始化
+### 1. 连接数据库 + 创建 TgenSql 实例
 
-```go
-import (
-    "database/sql"
-    "github.com/tianxinzizhen/tgsql"
-    _ "github.com/go-sql-driver/mysql"
-)
-
-func main() {
-    // 连接数据库
-    db, err := sql.Open("mysql", "user:password@tcp(localhost:3306)/dbname?charset=utf8mb4&parseTime=True&loc=Local")
-    if err != nil {
-        panic(err)
-    }
-    defer db.Close()
-
-    // 创建TgenSql实例
-    tdb := tgsql.NewTgenSql(db)
-}
-```
-
-### 参数引用方式
-
-- **常量**：直接使用常量值
-- **模板操作符**：`{.field}`、`{@field}`、`{field}`
-- **数据库字段名**：自动转换为结构体字段（如`{user_name}` → `{.UserName}`）
-- **占位符**：使用`?`作为参数占位符
-
-## 模板语法
-
-### 基本语法
-
-```go
-type User struct {
-    ID         int64
-    UserName   string
-    Age        int
-    CreateTime time.Time
-}
-```
-
-```sql
--- SQL表结构
-CREATE TABLE user (
-    id int64 primary key,
-    user_name varchar(255),
-    age int,
-    create_time timestamp
-);
-```
-
-### 字段引用
-
-```sql
--- 以下方式等价
-INSERT INTO user (id, user_name, age)
-VALUES ({id}, {user_name}, {age});
-
-INSERT INTO user (id, user_name, age)
-VALUES ({id, user_name, age});
-
-INSERT INTO user (id, user_name, age)
-VALUES ({@id, @user_name, @age});
-
-INSERT INTO user (id, user_name, age)
-VALUES ({.id, .user_name, .age});
-
-INSERT INTO user (id, user_name, age)
-VALUES ({.id}, {.user_name}, {.age});
-```
-
-### 可选条件
-
-使用方括号`[]`包裹可选的SQL条件：
-
-```sql
-SELECT * FROM user WHERE 1 = 1 [AND id = ? ] [AND user_name = ?];
--- 或者
-SELECT * FROM user WHERE 1 = 1 [AND id = @id ] [AND user_name = @user_name];
--- 或者
-SELECT * FROM user WHERE 1 = 1 [AND id = {id} ] [AND user_name = {user_name}];
--- 或者
-SELECT * FROM user WHERE 1 = 1 [AND id = {Id} ] [AND user_name = {UserName}];
--- 或者
-SELECT * FROM user WHERE 1 = 1 [AND id = {.id} ] [AND user_name = {.UserName}];
--- 等价于
-SELECT * FROM user WHERE 1 = 1 {if .Id} AND id = {Id} {end} {if .UserName} AND user_name = {UserName} {end};
-```
-
-### 实用模板函数
-
-#### 1. Like 函数
-
-```sql
--- 不同匹配模式
-SELECT * FROM user WHERE user_name like ?  -- 自动转换成 user_name {like .user_name}
-SELECT * FROM user WHERE user_name {like .user_name};  -- %value%
-SELECT * FROM user WHERE user_name {liker .user_name}; -- %value
-SELECT * FROM user WHERE user_name {likel .user_name}; -- value%
-```
-
-#### 2. Param 函数
-
-```sql
--- 简化多参数输出
-INSERT INTO user (id, user_name, age)
-VALUES ({param .id .user_name .age});
-
--- 等价于
-INSERT INTO user (id, user_name, age)
-VALUES ({.id}, {.user_name}, {.age});
-```
-
-#### 3. JSON 序列化
-
-```sql
--- 将对象转换为JSON字符串
-INSERT INTO user (id, info)
-VALUES ({.id}, {json .info});
-
--- 或
-INSERT INTO user (id, info)
-VALUES ({.id}, {marshal .info});
-```
-
-#### 4. In 函数
-
-```sql
--- 等价于
-SELECT * FROM user WHERE id in ?  -- 自动转换成 id {in .id}
--- 处理单个值
-SELECT * FROM user WHERE id {in .id};
--- 处理数组
-SELECT * FROM user WHERE id {in .ids};
-```
-
-#### 5. Set 函数
-
-自动生成UPDATE语句的SET部分：
-
-```sql
-UPDATE user SET {set .user} WHERE id = {.id};
-
--- 如果user是结构体，会自动过滤无效值
--- 等价于：id = {.ID}, user_name = {.UserName}, age = {.Age}, create_time = {.CreateTime}
-
--- 使用表别名
-UPDATE user u SET {set "u" .user} WHERE u.id = {.id};
-```
-
-#### 6. Where 函数
-
-自动生成WHERE条件：
-
-```sql
-SELECT * FROM user WHERE {where .user};
-
--- 如果user是结构体，会自动过滤无效值
--- 等价于：id = {.ID} AND user_name = {.UserName} AND age = {.Age} AND create_time = {.CreateTime}
-
--- 使用表别名
-SELECT * FROM user u WHERE {where "u" .user};
-```
-
-## 完整示例
-
-### 示例程序
-main.go
 ```go
 package main
 
 import (
     "context"
     "database/sql"
+    "embed"
     "fmt"
     "time"
 
@@ -203,323 +40,452 @@ import (
     _ "github.com/go-sql-driver/mysql"
 )
 
-// User 用户模型
-type User struct {
-    ID         int64     `json:"id"`
-    UserName   string    `json:"user_name"`
-    Age        int       `json:"age"`
-    Email      string    `json:"email"`
-    CreateTime time.Time `json:"create_time"`
-}
-
 func main() {
-    // 连接数据库
     db, err := sql.Open("mysql", "user:password@tcp(localhost:3306)/testdb?charset=utf8mb4&parseTime=True&loc=Local")
-    if err != nil {
-        panic(err)
-    }
+    if err != nil { panic(err) }
     defer db.Close()
 
-    // 测试数据库连接
-    if err := db.Ping(); err != nil {
-        panic(err)
-    }
-    fmt.Println("数据库连接成功")
-
-    // 创建TgenSql实例
     tdb := tgsql.NewTgenSql(db)
 
-    // 设置SQL日志
+    // 可选：开启 SQL 日志
     tdb.SqlLogFunc(func(ctx context.Context, funcName, sql string, args ...any) {
-        fmt.Printf("[%s] %s: %s %v\n", time.Now().Format("2006-01-02 15:04:05"), funcName, sql, args)
+        fmt.Printf("[%s] %s\n  SQL: %s\n  Args: %v\n",
+            time.Now().Format("15:04:05"), funcName, sql, args)
     })
 
-    // 创建用户表（仅示例）
-    createTableSQL := `CREATE TABLE IF NOT EXISTS user (
-        id int64 PRIMARY KEY AUTO_INCREMENT,
-        user_name varchar(255) NOT NULL,
-        age int,
-        email varchar(255),
-        create_time timestamp DEFAULT CURRENT_TIMESTAMP
-    )`
-    _, err = db.Exec(createTableSQL)
-    if err != nil {
-        panic(err)
-    }
-    fmt.Println("用户表创建成功")
+    _ = runDAO(tdb)
+}
 ```
 
-## 核心概念
+### 2. 在 DAO struct 上写 `//sql` / `/*sql*/` 注解
 
-`tgsql` 使用结构体方法签名结合SQL模板的方式来执行SQL语句。您需要：
+`user_dao.go`：
 
-1. 定义一个包含方法签名的结构体,且注释是//sql 或者/*sql 开头的
-2. 使用`InitDBFunc`初始化结构体方法
-
-### 1. 定义接口结构体
-
-user_db.go
 ```go
-// UserDB 用户数据访问接口, sql模板数据通过注释写入
-type UserDB struct {
-    *tgsql.TgenSql // 嵌入TgenSql
+package main
+
+import (
+    "context"
+    "database/sql"
+    "embed"
+)
+
+// 模型
+type User struct {
+    ID       int64
+    UserName string
+    Age      int
+}
+
+//go:embed *.go
+var userDaoFS embed.FS
+
+// UserDao —— 每个 func 字段的注释就是 SQL 模板
+type UserDao struct {
+    /*sql
+      INSERT INTO user (user_name, age)
+      VALUES(?)
+    */
+    Insert   func(ctx context.Context, u *User) (sql.Result, error)
+
+    //sql SELECT * FROM user WHERE id = {.id}
+    GetByID  func(ctx context.Context, id int64) (*User, error)
+
+    //sql SELECT * FROM user WHERE id IN {in .}
+    GetByIds func(ctx context.Context, ids []int64) ([]*User, error)
 
     /*sql
-    INSERT INTO user (user_name, age, email) VALUES ({.UserName}, {.Age}, {.Email});
+      SELECT * FROM user
+      WHERE 1 = 1
+      [AND age > {.age}]
+      [AND user_name {like .name}]
     */
-    Insert   func(ctx context.Context, user *User) (sql.Result, error)
-    /*sql
-    SELECT id, user_name, age, email, create_time FROM user WHERE id = {.id};
-    */
-    GetByID  func(ctx context.Context, id int64) (*User, error)
-    /*sql
-    UPDATE user SET {set .} WHERE id = {.ID};
-    */
-    Update   func(ctx context.Context, user *User) error
-    /*sql
-    SELECT id, user_name, age, email, create_time FROM user 
-    WHERE 1=1 [AND age > {.age}] [AND user_name {like .keyword}] 
-    ORDER BY id;
-    */
-    List     func(ctx context.Context, age int, keyword string) ([]*User, error)
-    /*sql
-    DELETE FROM user WHERE id = {.id};
-    */
+    List     func(ctx context.Context, age int, name string) ([]*User, error)
+
+    //sql UPDATE user SET {set .} WHERE id = {.Id}
+    Update   func(ctx context.Context, u *User) error
+
+    //sql DELETE FROM user WHERE id = {.id}
     Delete   func(ctx context.Context, id int64) error
 }
 ```
 
-#### 2. 加载模板并初始化
+### 3. 加载 + 绑定
 
 ```go
-//go:embed user_db.go
-var userSql string
-// 加载SQL模板
-if err := tdb.LoadFuncDataInfoString(userSql); err != nil {
-    panic(err)
-}
+func runDAO(tdb *tgsql.TgenSql) error {
+    // 加载 //sql 注解（三种方式任选一种）
+    // tdb.LoadFuncDataInfo(userDaoFS)                  // 从 embed.FS（推荐生产）
+    // tdb.LoadFuncDataInfoString("//sql ... 源码字符串") // 从字符串
+    // tdb.LoadFuncDataInfoBytes([]byte{...})             // 从字节数组
+    if err := tdb.LoadFuncDataInfo(userDaoFS); err != nil {
+        return err
+    }
 
-// 初始化UserDB
-var userDB UserDB
-if err := tdb.InitDBFunc(&userDB); err != nil {
-    panic(err)
-}
+    var dao UserDao
+    if err := tgsql.InitDBFunc(tdb, &dao); err != nil {
+        return err
+    }
 
-// 调用示例
+    ctx := context.Background()
 
-// 插入用户
-newUser := &User{
-    UserName: "张三",
-    Age:      25,
-    Email:    "zhangsan@example.com",
-}
-result, err := userDB.Insert(context.Background(), newUser)
-if err != nil {
-    panic(err)
-}
-lastID, _ := result.LastInsertId()
-fmt.Printf("插入用户成功，ID: %d\n", lastID)
+    // 调用 —— 和普通函数一样
+    res, err := dao.Insert(ctx, &User{UserName: "张三", Age: 25})
+    if err != nil { return err }
+    lastID, _ := res.LastInsertId()
 
-// 查询用户
-user, err := userDB.GetByID(context.Background(), lastID)
-if err != nil {
-    panic(err)
-}
-fmt.Printf("查询用户成功: %+v\n", user)
+    u, err := dao.GetByID(ctx, lastID)
+    if err != nil { return err }
+    fmt.Printf("用户: %+v\n", u)
 
-// 更新用户
-user.Age = 26
-user.Email = "zhangsan-updated@example.com"
-if err := userDB.Update(context.Background(), user); err != nil {
-    panic(err)
-}
-fmt.Println("更新用户成功")
+    // 可选条件：两个参数都给 → WHERE 1=1 AND age > 20 AND user_name like '%张%'
+    users, err := dao.List(ctx, 20, "张")
+    if err != nil { return err }
+    fmt.Printf("列表: %+v\n", users)
 
-// 列表查询
-users, err := userDB.List(context.Background(), 20, "张")
-if err != nil {
-    panic(err)
-}
-fmt.Printf("条件查询结果: %+v\n", users)
-
-// 删除用户
-if err := userDB.Delete(context.Background(), lastID); err != nil {
-    panic(err)
-}
-fmt.Printf("删除用户成功，ID: %d\n", lastID)
-```
-
-## 模板文件加载方式
-
-`tgsql` 支持多种方式加载SQL模板：
-
-```go
-// 1. 从字符串加载
-//go:embed user_db.go
-var userSql string
-if err := tdb.LoadFuncDataInfoString(userSql); err != nil {
-    panic(err)
-}
-
-// 2. 从字节数组加载
-userSqlBytes := []byte(userSql)
-if err := tdb.LoadFuncDataInfoBytes(userSqlBytes); err != nil {
-    panic(err)
-}
-
-// 3. 从embed.FS加载 (推荐用于生产环境)
-//go:embed *
-var sqlFiles embed.FS
-if err := tdb.LoadFuncDataInfo(sqlFiles); err != nil {
-    panic(err)
+    return nil
 }
 ```
 
-## 高级特性
+---
 
-### 自定义模板函数
+## 模板语法
 
-```go
-// 添加自定义模板函数
-tdb.AddTemplateFunc("customFunc", func(arg string) string {
-    return "custom_" + arg
-})
+### 参数引用
 
-// 使用自定义函数
-insertSQL := `INSERT INTO user (user_name) VALUES ({customFunc .UserName})`
+模板里可以用任意一种风格引用参数，预处理后统一处理：
+
+| 写法 | 说明 |
+|---|---|
+| `{.field}` | Go struct 字段名（PascalCase），如 `{.UserName}` |
+| `{field}` / `{@field}` | 数据库列名风格 → 自动转 PascalCase |
+| `{.age}` / `{age}` | → 都变成 `{.Age}` |
+| `{user_name}` | → 变成 `{.UserName}` |
+| `?` | 原生 `database/sql` 占位符（参数通过顺序传入） |
+
+> 默认列名转换：`snake_case → PascalCase`（`DefaultColumnToFieldNameFunc`）。
+> 可通过 `tdb.SetColumnToFieldNameFunc(自定义函数)` 覆盖。
+
+### 可选条件：方括号 `[...]`
+
+方括号包住的内容会被自动转成 `{if ...}...{end}`：
+
+```sql
+SELECT * FROM user WHERE 1 = 1
+[AND age > {.age}]                  -- age 非零时才输出
+[AND user_name {like .name}]        -- name 非空时才输出
 ```
 
-### SQL日志
+等价于：
 
-```go
-// 设置SQL执行日志
-tdb.SqlLogFunc(func(ctx context.Context, funcName, sql string, args ...any) {
-    log.Printf("SQL执行: %s %v", sql, args)
-})
+```sql
+SELECT * FROM user WHERE 1 = 1
+{if .Age} AND age > {.Age} {end}
+{if .Name} AND user_name {like .Name} {end}
 ```
 
-### 自定义分隔符
+---
+
+## 内置模板函数
+
+函数名 → 最终生成的 SQL 片段。所有函数自动 `unwrap` 解 interface{} / 指针。
+
+| 函数 | 生成 | 说明 |
+|---|---|---|
+| `{like .Name}` | `like ?`，args 加 `"%Name值%"` | 两端通配 |
+| `{liker .Name}` | `like ?`，args 加 `"Name值%"` | 右通配 |
+| `{likel .Name}` | `like ?`，args 加 `"%Name值"` | 左通配 |
+| `{in .Ids}` | `IN (?, ?, ...)` | 自动展开 slice；单个值也兼容 |
+| `{set .User}` | `col1=?, col2=?, ...` | 跳过零值字段；字段名自动 Pascal→snake |
+| `{set "u" .User}` | `u.col1=?, u.col2=?, ...` | 带表别名 |
+| `{where .Filter}` | `col1=? AND col2=? ...` | 同 set，用 `and` 连接 |
+| `{param .a .b .c}` | `?, ?, ?` | 多字段批量输出 |
+| `{json .Info}` / `{marshal .Info}` | `?`，args 加 JSON 字符串 | struct / map / slice 自动 `json.Marshal` |
+| `{comma .Flag}` | `,` 或空串 | 数字字段 >0 时输出逗号（用于动态列列表） |
+| `{sql "en"}` | `en` 原样输出 | 字符串拼接 |
+
+### `set` / `where` 的字段自动过滤
 
 ```go
-// 修改模板分隔符（默认是{}}
+type UpdateUser struct {
+    ID       int64   // 有值 → 包含
+    UserName string  // ""   → 跳过
+    Age      int     // 0    → 跳过
+    Email    string  // "x@x"→ 包含
+}
+```
+
+```sql
+UPDATE user SET {set .} WHERE id = {.Id}
+-- 生成: UPDATE user SET id=?, email=? WHERE id = ?
+```
+
+### 隐式转换（预处理自动做）
+
+| 模板里写 | 自动转成 |
+|---|---|
+| `user_name like ?` | `user_name {like .user_name}` |
+| `user_name {like .user_name}` | `user_name like ?`（不会重复生成 like 关键字） |
+| `id in ?` | `id {in .id}` |
+| `id = {user_name}` | `id = {.UserName}`（列名→字段名） |
+
+---
+
+## `?option{...}` 指令
+
+在 SQL 开头用 `?option{}` 给这条语句加行为开关：
+
+```sql
+//sql?option{not_prepare:true, name:CustomGet} SELECT * FROM user WHERE id = {.id}
+```
+
+| 选项 | 默认 | 说明 |
+|---|---|---|
+| `not_prepare` | `false` | 跳过 `sql.Prepare`，直接把所有 `?` 插值进 SQL 再执行。适合 DDL / 带自定义 SQL 片段的查询 |
+| `batch_insert` | `false` | 批量 INSERT，参数必须是 slice；每条记录用同一模板渲染后单独 `ExecContext`，相同 SQL 复用 `*sql.Stmt` |
+| `name` | 字段名 | 覆盖 `Get` / `Insert` 这类自动生成的字段名 |
+
+### 批量 INSERT 示例
+
+```go
+type BatchDao struct {
+    //sql?option{batch_insert:true} INSERT INTO user (user_name, age) VALUES(?)
+    BatchInsert func(ctx context.Context, rows []*User) error
+}
+```
+
+调用 `dao.BatchInsert(ctx, []*User{{...}, {...}, {...}})` 后，框架内部会循环 3 次：
+
+```sql
+INSERT INTO user (user_name, age) VALUES(?)  args=[张三 20]
+INSERT INTO user (user_name, age) VALUES(?)  args=[李四 25]
+INSERT INTO user (user_name, age) VALUES(?)  args=[王五 30]
+```
+
+相同 SQL 只 `Prepare` 一次，然后复用 `*sql.Stmt` 执行。
+
+---
+
+## 自定义分隔符
+
+默认 `{` `}`，可以改成任意字符（Go template 允许的）：
+
+```go
 tdb.Delims("{{", "}}")
 ```
 
-### 使用sql字符串替换模板变量
+---
+
+## 自定义模板函数
 
 ```go
-// 使用sql字符串替换模板变量
-    /*sql
-    SELECT id, user_name, age, email, create_time FROM user_{lang} 
-    WHERE 1=1 [AND age > {.age}] [AND user_name {like .keyword}] 
-    ORDER BY id;
-    */
-    List     func(ctx context.Context, lang sqlwrite.Sql, age int, keyword string) ([]*User, error)
-    /*sql
-    INSERT INTO user_{lang} (user_name) VALUES ({.UserName})
-    */
-    Insert   func(ctx context.Context, lang sqlwrite.Sql, user *User) (sql.Result, error)
+tdb.AddTemplateFunc("myquote", func(s string) string {
+    return "`" + s + "`"
+})
+
+// 或批量注册
+tdb.AddAllTemplateFunc(template.FuncMap{
+    "geo": func(lat, lng float64) string { return fmt.Sprintf("POINT(%f %f)", lng, lat) },
+})
 ```
-调用示例
+
+---
+
+## 直接调用 `BuildSQL`（不走 InitDBFunc）
+
+如果你不想定义 DAO struct，也可以直接渲染模板：
 
 ```go
-// 列表查询
-users, err := userDB.List(context.Background(), sqlwrite.Sql("en"), 20, "张")
-if err != nil {
-    panic(err)
-}
-fmt.Printf("条件查询结果: %+v\n", users)
-
-// 插入用户
-newUser := &User{
-    UserName: "张三",
-}
-result, err := userDB.Insert(context.Background(), sqlwrite.Sql("en"), newUser)
-if err != nil {
-    panic(err)
-}
-lastID, _ := result.LastInsertId()
-fmt.Printf("插入用户成功，ID: %d\n", lastID)
+sqlStr, args, err := tdb.BuildSQL(ctx,
+    `SELECT * FROM user WHERE 1=1 [AND age > {.age}] [AND user_name {like .name}]`,
+    map[string]any{"Age": 20, "Name": "张"},
+)
+// sqlStr = "SELECT * FROM user WHERE 1=1 AND age > ? AND user_name like ?"
+// args   = [20, "%张%"]
 ```
 
-### 注册参数转换器
+---
+
+## 高级特性
+
+### 注册参数转换器（写入 DB 前）
+
+当某个自定义类型无法被 `database/sql` 直接序列化时，实现 `sqlval.Convert[T]`：
 
 ```go
-// 必须实现该接口
-// type Convert[T any] interface {
-// 	ConvertValue(v T) (any, error)
-// 	ConvertValuePtr(v *T) (any, error)
-// }
-
-// 如果参数是一个特殊的时间类型，例如time.Time
-type Time2 struct {
-    time.Time
+// 业务用的地理坐标类型
+type GeoPoint struct {
+    Lng float64
+    Lat float64
 }
 
-type Time2Converter struct{}
-// 实现Convert接口
-func (t *Time2Converter) ConvertValue(v Time2) (any, error) {
-    return v.Time, nil
+// 实现 Convert[T]：把 GeoPoint → MySQL POINT 的 25 字节 WKB
+type GeoConverter struct{}
+
+func (g *GeoConverter) ConvertValue(v GeoPoint) (any, error) {
+    // SRID(4B) + order(1B=1) + POINTtype(4B=1) + X(8B big-endian) + Y(8B big-endian)
+    return nil, nil // 示例：实际实现见 test/geo_test.go
 }
-func (t *Time2Converter) ConvertValuePtr(v *Time2) (any, error) {
-    return v.Time, nil
+func (g *GeoConverter) ConvertValuePtr(v *GeoPoint) (any, error) {
+    return g.ConvertValue(*v)
 }
 
-// 注册参数转换器
-tdb.RegisterParamConverter(&Time2Converter{})
+// 注册
+sqlval.RegisterConvert[GeoPoint](&GeoConverter{})
 ```
 
-### 注册结果扫描器
+接口定义（go 1.18+ 泛型）：
 
 ```go
-// 必须实现该接口
-// type Scan[T any] interface {
-// 	ScanValue(v any) (T, error)
-// 	ScanValuePtr(v any) (*T, error)
-// }
-
-// 如果结果是一个特殊的时间类型，例如time.Time
-type Time2 struct {
-    time.Time
+type Convert[T any] interface {
+    ConvertValue(v T)     (any, error)
+    ConvertValuePtr(v *T) (any, error)
 }
-
-type Time2Scanner struct{
-    t time.Time
-}
-
-// 实现Scan接口
-func (ts *Time2Scanner) Scan(dest any) error {
-	if t, ok := dest.(time.Time); ok {
-		ts.t = t
-	}
-	return nil
-}
-
-func (t *Time2Scanner) ScanValue() (Time2, error) {
-    return Time2{Time: t.t}, nil
-}
-
-func (t *Time2Scanner) ScanValuePtr() (*Time2, error) {
-    return &Time2{Time: t.t}, nil
-}
-
-// 注册结果扫描器
-tdb.RegisterResultScanner(&Time2Scanner{})
 ```
 
+### 注册结果扫描器（读 DB 后）
 
-## 测试
+当查询结果需要转成自定义类型时，实现 `sqlval.ScanVal[T]`（同时要满足 `sql.Scanner`）：
 
-项目包含完整的测试用例，您可以通过以下命令运行：
+```go
+type GeoScanner struct {
+    bytes []byte
+}
+
+// sql.Scanner —— 用指针接收者
+func (s *GeoScanner) Scan(dest any) error {
+    // dest 是 mysql 驱动传过来的 []byte WKB
+    switch v := dest.(type) {
+    case []byte:
+        s.bytes = v
+    case string:
+        s.bytes = []byte(v)
+    }
+    return nil
+}
+
+// ScanVal[T] —— 用值接收者
+func (s GeoScanner) ScanValue() (GeoPoint, error) {
+    // 解析 WKB → GeoPoint
+    return GeoPoint{Lng: 116.4, Lat: 39.9}, nil
+}
+func (s GeoScanner) ScanValuePtr() (*GeoPoint, error) {
+    p, _ := s.ScanValue()
+    return &p, nil
+}
+
+// 注册
+sqlval.RegisterScanVal[GeoPoint](GeoScanner{})
+```
+
+接口定义：
+
+```go
+type ScanVal[T any] interface {
+    ScanValue()     (T, error)
+    ScanValuePtr()  (*T, error)
+}
+```
+
+然后 DAO struct 里直接用这个类型，框架扫描时会自动走注册的转换器：
+
+```go
+type GeoDao struct {
+    //sql SELECT * FROM geo_points WHERE id = {.id}
+    Get func(ctx context.Context, id int64) (*GeoPoint, error)
+}
+```
+
+---
+
+## `InitDBFunc` 自动推断的操作类型
+
+根据返回值签名自动分发到不同路径：
+
+| 返回值签名 | 操作类型 | 内部行为 |
+|---|---|---|
+| `(sql.Result, error)` | `execAction` | `db.ExecContext` |
+| `(error)` | `execNoResultAction` | `db.ExecContext` / batch insert / `option{not_prepare}` |
+| `([]*T, error)` | `selectAction` | `db.QueryContext` + 扫描所有行 |
+| `(*T, error)` | `selectOneAction` | `db.QueryContext` + 扫描第一行后 break |
+| `(error)` + `option{batch_insert:true}` | 批量路径 | 遍历 slice 参数，逐条 `ExecContext` |
+
+---
+
+## 项目结构
+
+```
+tgsql/
+├── tgensql.go                 TgenSql 主入口、NewTgenSql、BuildSQL、Execute
+├── sql_func.go                内置模板函数（like/in/set/where/param/marshal...）
+├── makefunc_context.go        InitDBFunc 核心：reflect.MakeFunc 把 //sql 字段填充成闭包
+├── sql_option.go              funcExecOption 内部选项（param、sql、args、result）
+├── sql_common_type.go         Operation 枚举、contextType/errorType/sqlResultType
+├── sql_error.go / sql_recover.go / sql_tx.go / sql_record.go
+├── template/pre_parse/       预处理引擎
+│   ├── pre_sql.go             {col}→{.Col}、方括号→{if}、隐式转换
+│   ├── sql_lex.go             SQL 词法扫描（跳过引号内的内容）
+│   └── pre_sql_test.go        preprocessor 单测
+├── load/                      从 Go 源码里提取 //sql 注解
+│   ├── all_load.go            LoadFuncDataInfo / LoadFuncDataInfoString / LoadFuncDataInfoBytes
+│   ├── sql_comment_data.go    parseComment → SqlDataInfo{TypeName,Name,FuncName,Sql,Param,...}
+│   └── load_test.go           extractPkgPath / extractSQLBody / applyOption 单测
+├── sqlval/                    参数转换器 & 结果扫描器
+│   ├── convert_value.go       Convert[T] 接口 + localConvertVal
+│   ├── result_scan.go         GetScanDest：columns → dest[] + deferFn[]
+│   ├── scan.go                ScanVal[T] 接口 + json 列识别
+│   └── scan_json.go           注册为 ScanVal 的 json.RawMessage 包装
+├── util/
+│   ├── fieldName.go           SnakeToCamel / CamelToPascal / PascalToSnakeCase
+│   ├── reflect.go             Indirect 等 reflect 工具
+│   └── sqlescape.go           InterpolateParams（option{not_prepare} 用）
+└── test/                      集成测试（需要 MySQL 数据库）
+    ├── base.go                newTDB / testDB / Student model / DSN
+    ├── student_dao.go         StudentDao 真实 DAO
+    ├── student_dao_test.go    CRUD + 可选条件
+    ├── query_test.go          BuildSQL 直接调用
+    ├── geo_test.go            GeoPoint 参数转换器 + 结果扫描器
+    └── batch_insert_test.go   option{batch_insert:true}
+```
+
+---
+
+## 运行测试
+
+需要本地有 MySQL（默认 `root:Lix@1234@tcp(localhost:3306)/tgsql_test`）：
 
 ```bash
-go test ./test
+# 先建表 + 种子数据
+mysql -uroot -p'Lix@1234' -e "
+CREATE DATABASE IF NOT EXISTS tgsql_test CHARSET utf8mb4;
+USE tgsql_test;
+DROP TABLE IF EXISTS student;
+CREATE TABLE student (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_name   VARCHAR(50) NOT NULL,
+    age         INT,
+    email       VARCHAR(100),
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO student (id, user_name, age) VALUES
+    (1, 'Alice', 20), (2, 'Bob', 25), (3, 'Carol', 30), (4, 'David', 35), (5, 'Eve', 28);
+"
+
+# 跑测试
+go test ./... -count=1
+
+# 带 race detector
+go test -race ./... -count=1
 ```
+
+仅跑不依赖 DB 的包：
+
+```bash
+go test ./load/ ./template/pre_parse/ -v -count=1
+```
+
+---
 
 ## 许可证
 
 MIT License
-
-## 贡献
-
-欢迎提交Issue和Pull Request！

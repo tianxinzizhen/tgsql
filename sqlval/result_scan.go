@@ -6,211 +6,232 @@ import (
 	"reflect"
 )
 
-var tempScanDest map[reflect.Type]any
-
-// 创建临时扫描字段
+// getTempScanDest 为不匹配 struct 字段的列创建临时扫描目标（返回 *T 指针）。
+// 每次调用返回全新实例，多 goroutine 并发安全。
 func getTempScanDest(scanType reflect.Type) any {
-	if tempScanDest == nil {
-		tempScanDest = make(map[reflect.Type]any)
-	}
-	if dest, ok := tempScanDest[scanType]; !ok {
-		tempScanDest[scanType] = reflect.New(scanType).Interface()
-		return tempScanDest[scanType]
-	} else {
-		return dest
-	}
+	return reflect.New(scanType).Interface()
 }
 
-func setMapValue(t reflect.Type, ret []reflect.Value, isSlice bool) (v reflect.Value, err error) {
+// setMapValue 创建一个 map 扫描目标并设置到 ret[0]（可能是 slice 追加）
+func setMapValue(t reflect.Type, ret []reflect.Value, isSlice bool) (reflect.Value, error) {
 	if t.Key().Kind() != reflect.String {
-		err = fmt.Errorf("map key must be string")
-		return
+		return reflect.Value{}, fmt.Errorf("map key must be string")
 	}
-	v = reflect.MakeMap(t)
+	v := reflect.MakeMap(t)
 	if isSlice {
 		ret[0] = reflect.Append(ret[0], v)
 	} else {
 		ret[0] = v
 	}
-	return
+	return v, nil
 }
 
-func setValue(t reflect.Type, ret []reflect.Value, isSlice bool) (v reflect.Value, deferFn []func()) {
+// applyToRet 根据 isSlice 决定把 v 设置到 ret[0] 还是追加到 ret[0]
+func applyToRet(v reflect.Value, ret []reflect.Value, isSlice bool) {
+	if isSlice {
+		ret[0] = reflect.Append(ret[0], v)
+	} else {
+		ret[0] = v
+	}
+}
+
+// setValue 创建一个非 map 的扫描目标 + 对应的 deferFn，
+// deferFn 会在扫描完成后把值写回 ret[0]（处理 ScanVal / 指针解引用）。
+func setValue(t reflect.Type, ret []reflect.Value, isSlice bool) (reflect.Value, []func()) {
+	var v reflect.Value
+	var deferFn []func()
+
 	if isScanVal(t) {
+		// 用户注册了 ScanVal[T] 包装器
 		v = reflect.New(getScanValType(t)).Elem()
 		deferFn = append(deferFn, func() {
-			if isSlice {
-				switch t.Kind() {
-				case reflect.Pointer:
-					ret[0] = reflect.Append(ret[0], getScanValPtr(v))
-				default:
-					ret[0] = reflect.Append(ret[0], getScanVal(v))
-				}
+			dst := v
+			if t.Kind() == reflect.Pointer {
+				dst = getScanValPtr(v)
 			} else {
-				switch t.Kind() {
-				case reflect.Pointer:
-					ret[0] = getScanValPtr(v)
-				default:
-					ret[0] = getScanVal(v)
-				}
+				dst = getScanVal(v)
 			}
+			applyToRet(dst, ret, isSlice)
 		})
-	} else {
-		switch t.Kind() {
-		case reflect.Pointer:
-			v = reflect.New(t.Elem())
-		default:
-			v = reflect.New(t).Elem()
-		}
-		if t.Kind() == reflect.Pointer {
-			if isSlice {
-				ret[0] = reflect.Append(ret[0], v)
-			} else {
-				ret[0] = v
-			}
-			v = v.Elem()
-		} else {
-			if isSlice {
-				deferFn = append(deferFn, func() {
-					ret[0] = reflect.Append(ret[0], v)
-				})
-			} else {
-				deferFn = append(deferFn, func() {
-					ret[0] = v
-				})
-			}
-		}
+		return v, deferFn
 	}
-	return
+
+	// 普通类型：如果是指针，先解引用得到可扫描的目标
+	if t.Kind() == reflect.Pointer {
+		v = reflect.New(t.Elem()) // *Elem — sql 会扫进这个
+		applyToRet(v, ret, isSlice)
+		v = v.Elem() // 把 ret[0] 设好后，继续用 v.Elem() 处理字段
+	} else {
+		v = reflect.New(t).Elem()
+		deferFn = append(deferFn, func() {
+			applyToRet(v, ret, isSlice)
+		})
+	}
+	return v, deferFn
 }
-func GetScanDest(filedName func(t reflect.Type, name string) string, columns []*sql.ColumnType, ret []reflect.Value) (destSlice []any, deferFn []func(), err error) {
+
+// GetScanDest 根据返回值 ret 的类型为每一列构造扫描目标切片。
+// deferFn 列表会在 sql.Rows.Scan 完成后把临时值写回 ret。
+func GetScanDest(columns []*sql.ColumnType, ret []reflect.Value, columnToFieldNameFunc func(column string) string) (destSlice []any, deferFn []func(), err error) {
 	if len(ret) == 0 {
-		err = fmt.Errorf("not scan dest")
-		return
+		return nil, nil, fmt.Errorf("not scan dest")
 	}
-	var t reflect.Type
 	if len(ret) == 1 {
-		t = ret[0].Type()
-		var v reflect.Value
-		var df []func()
-		switch t.Kind() {
-		case reflect.Map:
-			v, err = setMapValue(t, ret, false)
+		return handleSingleReturn(columns, ret, columnToFieldNameFunc)
+	}
+	d, df := handleMultiReturn(columns, ret)
+	return d, df, nil
+}
+
+// handleSingleReturn 只有一个返回值的场景（struct / map / slice / primitive）
+func handleSingleReturn(columns []*sql.ColumnType, ret []reflect.Value, columnToFieldNameFunc func(column string) string) ([]any, []func(), error) {
+	t := ret[0].Type()
+	var v reflect.Value
+	var df []func()
+
+	switch t.Kind() {
+	case reflect.Map:
+		var err error
+		v, err = setMapValue(t, ret, false)
+		if err != nil {
+			return nil, nil, err
+		}
+	case reflect.Slice:
+		elem := t.Elem()
+		if elem.Kind() == reflect.Map {
+			var err error
+			v, err = setMapValue(elem, ret, true)
 			if err != nil {
-				return
+				return nil, nil, err
 			}
-		case reflect.Slice:
-			t = t.Elem()
-			switch t.Kind() {
-			case reflect.Map:
-				v, err = setMapValue(t, ret, true)
-				if err != nil {
-					return
-				}
-			default:
-				v, df = setValue(t, ret, true)
-			}
+		} else {
+			v, df = setValue(elem, ret, true)
+		}
+	default:
+		v, df = setValue(t, ret, false)
+	}
+
+	var destSlice []any
+	var deferFn []func()
+
+	for i, c := range columns {
+		switch v.Type().Kind() {
+		case reflect.Map:
+			valT := v.Type().Elem()
+			val := reflect.New(valT).Elem()
+			deferFn = append(deferFn, func() {
+				v.SetMapIndex(reflect.ValueOf(c.Name()), val)
+			})
+			destSlice = append(destSlice, val.Addr().Interface())
+
+		case reflect.Struct:
+			d, extraDefer := structColumnDest(c, v, i, columnToFieldNameFunc)
+			destSlice = append(destSlice, d...)
+			deferFn = append(deferFn, extraDefer...)
+
 		default:
-			v, df = setValue(t, ret, false)
-		}
-		for i, c := range columns {
-			switch v.Type().Kind() {
-			case reflect.Map:
-				valT := v.Type().Elem()
-				val := reflect.New(valT).Elem()
-				deferFn = append(deferFn, func() {
-					v.SetMapIndex(reflect.ValueOf(c.Name()), val)
-				})
-				destSlice = append(destSlice, val.Addr().Interface())
-			case reflect.Struct:
-				if i == 0 && isScanValJson(c) {
-					ScanVal := ShouldScanValJson(c, v)
-					destSlice = append(destSlice, ScanVal.Interface())
-					deferFn = append(deferFn, func() {
-						v.Set(getScanValJson(ScanVal))
-					})
-					continue
-				} else if isNotScanVal(v.Type()) {
-					fname := filedName(v.Type(), c.Name())
-					fv := v.FieldByName(fname)
-					if !fv.IsValid() || !fv.CanSet() {
-						destSlice = append(destSlice, getTempScanDest(c.ScanType()))
-						continue
-					}
-					if isScanVal(fv.Type()) {
-						scanV := reflect.New(getScanValType(fv.Type())).Elem()
-						destSlice = append(destSlice, scanV.Addr().Interface())
-						deferFn = append(deferFn, func() {
-							switch fv.Kind() {
-							case reflect.Pointer:
-								fv.Set(getScanValPtr(scanV))
-							default:
-								fv.Set(getScanVal(scanV))
-							}
-						})
-					} else {
-						ScanVal := ShouldScanValJson(c, fv)
-						if isScanValJson(c) {
-							destSlice = append(destSlice, ScanVal.Interface())
-							deferFn = append(deferFn, func() {
-								fv.Set(getScanValJson(ScanVal))
-							})
-						} else {
-							destSlice = append(destSlice, fv.Addr().Interface())
-						}
-					}
-					continue
-				}
-				fallthrough
-			default:
-				if i == 0 && v.CanSet() {
-					if isScanValJson(c) {
-						ScanVal := ShouldScanValJson(c, v)
-						destSlice = append(destSlice, ScanVal.Interface())
-						deferFn = append(deferFn, func() {
-							v.Set(getScanValJson(ScanVal))
-						})
-					} else {
-						destSlice = append(destSlice, v.Addr().Interface())
-					}
-				} else {
-					destSlice = append(destSlice, getTempScanDest(c.ScanType()))
-				}
-			}
-		}
-		deferFn = append(deferFn, df...)
-	} else {
-		if len(columns) > 0 {
-			for i := 0; i < len(columns); i++ {
-				if i < len(ret) {
-					t := ret[i].Type()
-					switch {
-					case isScanVal(t):
-						scanV := reflect.New(getScanValType(t)).Elem()
-						destSlice = append(destSlice, scanV.Addr().Interface())
-						deferFn = append(deferFn, func() {
-							switch t.Kind() {
-							case reflect.Pointer:
-								ret[i] = getScanValPtr(scanV)
-							default:
-								ret[i] = getScanVal(scanV)
-							}
-						})
-					case isScanValJson(columns[i]):
-						ScanVal := ShouldScanValJson(columns[i], ret[i])
-						destSlice = append(destSlice, ScanVal.Addr().Interface())
-						deferFn = append(deferFn, func() {
-							ret[i] = getScanValJson(ScanVal)
-						})
-					default:
-						ret[i] = reflect.New(t).Elem()
-						destSlice = append(destSlice, ret[i].Addr().Interface())
-					}
-				} else {
-					destSlice = append(destSlice, getTempScanDest(columns[i].ScanType()))
-				}
-			}
+			d := scalarColumnDest(c, v, i)
+			destSlice = append(destSlice, d)
 		}
 	}
-	return
+
+	deferFn = append(deferFn, df...)
+	return destSlice, deferFn, nil
+}
+
+// handleMultiReturn 多个返回值的场景（多 return 变量匹配多列）
+func handleMultiReturn(columns []*sql.ColumnType, ret []reflect.Value) ([]any, []func()) {
+	var destSlice []any
+	var deferFn []func()
+
+	for i, c := range columns {
+		if i >= len(ret) {
+			// 多余列 —— 临时目标
+			destSlice = append(destSlice, getTempScanDest(c.ScanType()))
+			continue
+		}
+		t := ret[i].Type()
+		switch {
+		case isScanVal(t):
+			scanV := reflect.New(getScanValType(t)).Elem()
+			destSlice = append(destSlice, scanV.Addr().Interface())
+			deferFn = append(deferFn, func() {
+				if t.Kind() == reflect.Pointer {
+					ret[i] = getScanValPtr(scanV)
+				} else {
+					ret[i] = getScanVal(scanV)
+				}
+			})
+		case isScanValJson(c):
+			scanWrap := ShouldScanValJson(c, ret[i])
+			destSlice = append(destSlice, scanWrap.Addr().Interface())
+			deferFn = append(deferFn, func() {
+				ret[i] = getScanValJson(scanWrap)
+			})
+		default:
+			ret[i] = reflect.New(t).Elem()
+			destSlice = append(destSlice, ret[i].Addr().Interface())
+		}
+	}
+	return destSlice, deferFn
+}
+
+// structColumnDest 为 struct 类型的目标值处理某一列 → 返回 dest + 写回 defer
+func structColumnDest(c *sql.ColumnType, v reflect.Value, colIndex int, columnToFieldNameFunc func(string) string) ([]any, []func()) {
+	// JSON 列：整列扫进 struct 的 json 字段
+	if colIndex == 0 && isScanValJson(c) {
+		scanWrap := ShouldScanValJson(c, v)
+		return []any{scanWrap.Interface()}, []func(){
+			func() { v.Set(getScanValJson(scanWrap)) },
+		}
+	}
+
+	// 用户注册了 ScanVal 包装器 —— 跳过按字段名映射（这是"struct 本身就是 ScanVal 包装器"的场景）
+	if isScanVal(v.Type()) {
+		return []any{getTempScanDest(c.ScanType())}, nil
+	}
+
+	// 按 column name 找 struct field
+	fname := columnToFieldNameFunc(c.Name())
+	fv := v.FieldByName(fname)
+	if !fv.IsValid() || !fv.CanSet() {
+		return []any{getTempScanDest(c.ScanType())}, nil
+	}
+
+	// 字段本身是 ScanVal
+	if isScanVal(fv.Type()) {
+		scanV := reflect.New(getScanValType(fv.Type())).Elem()
+		return []any{scanV.Addr().Interface()}, []func(){
+			func() {
+				if fv.Kind() == reflect.Pointer {
+					fv.Set(getScanValPtr(scanV))
+				} else {
+					fv.Set(getScanVal(scanV))
+				}
+			},
+		}
+	}
+
+	// 字段是 JSON 列
+	if isScanValJson(c) {
+		scanWrap := ShouldScanValJson(c, fv)
+		return []any{scanWrap.Interface()}, []func(){
+			func() { fv.Set(getScanValJson(scanWrap)) },
+		}
+	}
+
+	// 普通字段
+	return []any{fv.Addr().Interface()}, nil
+}
+
+// scalarColumnDest 为非 struct 非 map 的单值目标处理某一列（仅 colIndex==0 时才有效）
+func scalarColumnDest(c *sql.ColumnType, v reflect.Value, colIndex int) any {
+	if colIndex == 0 && v.CanSet() {
+		if isScanValJson(c) {
+			scanWrap := ShouldScanValJson(c, v)
+			return scanWrap.Interface()
+		}
+		return v.Addr().Interface()
+	}
+	return getTempScanDest(c.ScanType())
 }

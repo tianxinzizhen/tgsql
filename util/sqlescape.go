@@ -276,11 +276,7 @@ func InterpolateParams(query string, args []any, sqlEscapeBytesBackslash bool) (
 			}
 			buf = append(buf, '\'')
 		default:
-			if v == nil {
-				buf = append(buf, "NULL"...)
-			} else {
-				buf = append(buf, fmt.Sprintf("%v", v)...)
-			}
+			buf = append(buf, fmt.Sprintf("%v", v)...)
 		}
 	}
 	return string(buf), nil

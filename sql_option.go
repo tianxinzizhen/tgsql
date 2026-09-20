@@ -7,15 +7,16 @@ import (
 )
 
 type funcExecOption struct {
-	ctx    context.Context
-	param  any
-	result []reflect.Value
-	sql    string
-	args   []any
-	option int
-	offset int
-	db     any
-	stmt   *sql.Stmt
+	ctx                   context.Context
+	param                 any
+	result                []reflect.Value
+	sql                   string
+	args                  []any
+	option                int
+	offset                int
+	db                    any
+	stmt                  *sql.Stmt
+	columnToFieldNameFunc func(string) string
 }
 
 func (op *funcExecOption) GetDB(ctx context.Context) any {

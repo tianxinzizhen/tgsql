@@ -30,7 +30,7 @@ func (st SqlTemplate[T]) Query(tdb *TgenSql) (T, error) {
 		}
 	}
 	var err error
-	op.sql, op.args, err = tdb.sqlTemplateBuild(op.ctx, op.sql, op.param)
+	op.sql, op.args, err = tdb.executeTemplate(op.ctx, st.Sql, op.param, "SqlTemplate.Query")
 	if err != nil {
 		return result, err
 	}
@@ -57,7 +57,7 @@ func (st SqlTemplate[T]) Exec(tdb *TgenSql) (sql.Result, error) {
 		}
 	}
 	var err error
-	op.sql, op.args, err = tdb.sqlTemplateBuild(op.ctx, op.sql, op.param)
+	op.sql, op.args, err = tdb.executeTemplate(op.ctx, st.Sql, op.param, "SqlTemplate.Exec")
 	if err != nil {
 		return nil, err
 	}

@@ -14,6 +14,11 @@ type Convert[T any] interface {
 
 var localConvertValMap = make(map[reflect.Type]reflect.Value)
 
+// typedNilError 是 (interface{})(nil)，用于构造 reflect.ValueOf(typedNilError)，
+// 得到的是 "typed nil" Value（IsValid=true, IsNil=true），而不是零值 Value。
+// 这样调用方可以安全检查 IsNil() 后再做 .(error) 断言。
+var typedNilError error = nil
+
 func RegisterConvert[T any](gv Convert[T]) error {
 	if reflect.TypeFor[T]().Kind() == reflect.Pointer {
 		return fmt.Errorf("gv.ConvertValuePtr() must be not pointer")
@@ -21,6 +26,11 @@ func RegisterConvert[T any](gv Convert[T]) error {
 	localConvertValMap[reflect.TypeFor[T]()] = reflect.ValueOf(gv.ConvertValue)
 	localConvertValMap[reflect.TypeFor[*T]()] = reflect.ValueOf(gv.ConvertValuePtr)
 	return nil
+}
+
+// nilErrVal 返回一个 typed nil error 的 reflect.Value（IsValid=true, IsNil=true）
+func nilErrVal() reflect.Value {
+	return reflect.ValueOf(typedNilError)
 }
 
 func localConvertVal(v reflect.Value) []reflect.Value {
@@ -36,16 +46,16 @@ func localConvertVal(v reflect.Value) []reflect.Value {
 		switch jv.Kind() {
 		case reflect.Struct, reflect.Map, reflect.Slice, reflect.Array:
 			if !jv.IsValid() {
-				return []reflect.Value{v, reflect.ValueOf(nil)}
+				return []reflect.Value{v, nilErrVal()}
 			}
 			mJson, err := json.Marshal(jv.Interface())
 			if err != nil {
 				return []reflect.Value{v, reflect.ValueOf(err)}
 			}
-			return []reflect.Value{reflect.ValueOf(string(mJson)), reflect.ValueOf(nil)}
+			return []reflect.Value{reflect.ValueOf(string(mJson)), nilErrVal()}
 		}
 	}
-	return []reflect.Value{v, reflect.ValueOf(nil)}
+	return []reflect.Value{v, nilErrVal()}
 }
 
 func ConvertValue(ci any, v any) (any, error) {
@@ -60,24 +70,23 @@ func ConvertValue(ci any, v any) (any, error) {
 		if err == nil {
 			return nv.Value, nil
 		}
+		// fallthrough 到默认参数转换器
 		fallthrough
 	default:
-		var cv driver.Value
-		cv, err = driver.DefaultParameterConverter.ConvertValue(v)
-		if err == nil {
+		cv, err2 := driver.DefaultParameterConverter.ConvertValue(v)
+		if err2 == nil {
 			return cv, nil
-		} else {
-			ret := localConvertVal(reflect.ValueOf(v))
-			if ret[1].IsValid() {
-				return ret[0].Interface(), ret[1].Interface().(error)
-			}
-			return ret[0].Interface(), nil
 		}
+		ret := localConvertVal(reflect.ValueOf(v))
+		if ret[1].IsValid() && !ret[1].IsNil() {
+			return ret[0].Interface(), ret[1].Interface().(error)
+		}
+		return ret[0].Interface(), nil
 	}
 }
 
 func ConvertValues(ci any, args []any) ([]any, error) {
-	ret := []any{}
+	ret := make([]any, 0, len(args))
 	for _, arg := range args {
 		v, err := ConvertValue(ci, arg)
 		if err != nil {

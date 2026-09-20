@@ -411,12 +411,12 @@ func TestLikeInImplicitConversion(t *testing.T) {
 
 	assertPreprocess(t,
 		"SELECT * FROM user WHERE id in ?",
-		"SELECT * FROM user WHERE id IN {in .id}",
+		"SELECT * FROM user WHERE id {in .id}",
 		cfg)
 
 	assertPreprocess(t,
 		"SELECT * FROM user WHERE id IN ?",
-		"SELECT * FROM user WHERE id IN {in .id}",
+		"SELECT * FROM user WHERE id {in .id}",
 		cfg)
 
 	// 带自定义转换函数

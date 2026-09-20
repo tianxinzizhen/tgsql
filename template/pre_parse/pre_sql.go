@@ -182,6 +182,15 @@ func Preprocess(sql string, cfg Config) string {
 			continue
 		}
 
+		// 检测"冗余关键字跳过"：
+		// 当 IN / LIKE 关键字后面紧跟 {in ...} / {like ...} 模板调用时，
+		// 跳过这个关键字（因为模板函数自己会输出 IN 或 like）
+		// 例如: id IN {in .Ids} → 跳过 "IN " → id {in .Ids} → 函数再输出 IN (...)
+		if skip := skipRedundantKeyword(sql, i, cfg); skip > 0 {
+			i += skip
+			continue
+		}
+
 		// 普通字符
 		sb.WriteByte(sql[i])
 		i++
@@ -190,7 +199,85 @@ func Preprocess(sql string, cfg Config) string {
 	return sb.String()
 }
 
-// skipSQLString 跳过SQL字符串（单引号或双引号），处理转义
+// skipRedundantKeyword 检测并跳过冗余的 IN/LIKE 关键字。
+// 当 identifier 是 IN 或 LIKE（不区分大小写），且后面紧跟空白 + {in / {liker / {likel / {like 模板调用时，
+// 返回跳过的字符数（identifier + 后续空白），调用方从 i += consumed 跳过这些字符不写入 sb。
+//
+// 示例:
+//
+//	id IN {in .Ids}     → 跳过 "IN "     → 返回 3
+//	id in {in .Ids}     → 跳过 "in "     → 返回 3
+//	user_name like {like .Name} → 跳过 "like " → 返回 5
+//	id LIKE {liker .Ids}→ 跳过 "LIKE "   → 返回 5
+func skipRedundantKeyword(sql string, i int, cfg Config) int {
+	n := len(sql)
+	if i >= n {
+		return 0
+	}
+
+	// 当前位置必须是 identifier 起始
+	r := rune(sql[i])
+	if !unicode.IsLetter(r) && r != '_' {
+		return 0
+	}
+
+	// 提取完整 identifier
+	identStart := i
+	for i < n {
+		r := rune(sql[i])
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
+			break
+		}
+		i++
+	}
+	ident := strings.ToUpper(sql[identStart:i])
+
+	// 只处理 IN / LIKE
+	var targetFunc string
+	switch ident {
+	case "IN":
+		targetFunc = "in"
+	case "LIKE":
+		targetFunc = "like"
+	default:
+		return 0
+	}
+
+	// 跳过 identifier 后的空白
+	for i < n && isSpace(rune(sql[i])) {
+		i++
+	}
+	afterSpaces := i
+
+	// 检查后面是不是 {func ... 模板调用
+	leftDelim := cfg.LeftDelim
+	if !strings.HasPrefix(sql[i:], leftDelim) {
+		return 0
+	}
+	i += len(leftDelim)
+
+	// 提取 { 后的函数名
+	funcStart := i
+	for i < n {
+		r := rune(sql[i])
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
+			break
+		}
+		i++
+	}
+	funcName := strings.ToLower(sql[funcStart:i])
+
+	// like 系列: like / liker / likel
+	if targetFunc == "like" && (funcName == "like" || funcName == "liker" || funcName == "likel") {
+		return afterSpaces - identStart
+	}
+	// in 函数
+	if targetFunc == "in" && funcName == "in" {
+		return afterSpaces - identStart
+	}
+
+	return 0
+}
 func skipSQLString(s string, start int, quote byte) int {
 	i := start + 1
 	n := len(s)
@@ -744,17 +831,11 @@ func processLikeInQuestion(sql string, start int, cfg Config) (string, int) {
 	}
 
 	// 替换整个 "identifier like ?" 或 "identifier in ?"
-	// result 包含原 identifier 和新的模板调用，保持语法正确
+	// like 函数返回 "like ?"
+	// in 函数返回 "IN (?, ...)"
+	// 两种函数都自带关键字，预处理这里只负责把 identifier 和模板调用拼起来
 	consumed := questionStart + 1 - identStart
-	// like 函数返回 "like ?" —— 不需要额外关键字
-	// in 函数返回 "(?,...)" —— 需要保留 IN 关键字
-	var result string
-	switch funcName {
-	case "in":
-		result = identName + " IN " + cfg.LeftDelim + funcName + " ." + fieldRef + cfg.RightDelim
-	default:
-		result = identName + " " + cfg.LeftDelim + funcName + " ." + fieldRef + cfg.RightDelim
-	}
+	result := identName + " " + cfg.LeftDelim + funcName + " ." + fieldRef + cfg.RightDelim
 
 	return result, consumed
 }

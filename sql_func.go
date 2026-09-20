@@ -158,7 +158,7 @@ func (sq *sqlFunc) marshal(list ...reflect.Value) (string, error) {
 
 func (sq *sqlFunc) in(list ...reflect.Value) string {
 	sb := &strings.Builder{}
-	sb.WriteString("(")
+	sb.WriteString("IN (")
 	var num int
 	for _, v := range list {
 		v = unwrap(v)

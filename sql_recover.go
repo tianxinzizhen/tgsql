@@ -33,15 +33,6 @@ func (tdb *TgenSql) Recover(ctx context.Context, err *error) {
 	}
 }
 
-func (tdb *TgenSql) enableRecover(ctx context.Context) {
-	if ctx != nil {
-		recoverPanic, ok := ctx.Value(recoverPanic{}).(*bool)
-		if ok {
-			*recoverPanic = true
-		}
-	}
-}
-
 func (tdb *TgenSql) FromRecover(ctx context.Context) (*bool, bool) {
 	if ctx == nil {
 		return nil, false

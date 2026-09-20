@@ -1377,3 +1377,7 @@ func precededByKeyword(sql string, pos int, keywords ...string) bool {
 	}
 	return false
 }
+
+func isSpace(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\r' || r == '\n'
+}

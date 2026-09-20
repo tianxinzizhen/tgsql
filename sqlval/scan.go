@@ -34,10 +34,6 @@ func isScanVal(t reflect.Type) bool {
 	return ok
 }
 
-func isNotScanVal(t reflect.Type) bool {
-	return !isScanVal(t)
-}
-
 func getScanValType(t reflect.Type) reflect.Type {
 	if sv, ok := localScanVal[t]; ok {
 		return sv

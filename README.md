@@ -161,7 +161,9 @@ func runDAO(tdb *tgsql.TgenSql) error {
 | `{field}` / `{@field}` | 数据库列名风格 → 自动转 PascalCase |
 | `{.age}` / `{age}` | → 都变成 `{.Age}` |
 | `{user_name}` | → 变成 `{.UserName}` |
-| `?` | 原生 `database/sql` 占位符（参数通过顺序传入） |
+| `?` | 原生 `database/sql` 占位符 |
+| `列名 = ?` | **自动参数化**：预处理转成 `列名 = {param .列名}`（最简便的等值条件写法） |
+| `列名 = @列名` | 同上：`@列名` 风格也被识别，自动转成 `{param .列名}` |
 
 > 默认列名转换：`snake_case → PascalCase`（`DefaultColumnToFieldNameFunc`）。
 > 可通过 `tdb.SetColumnToFieldNameFunc(自定义函数)` 覆盖。
@@ -222,12 +224,39 @@ UPDATE user SET {set .} WHERE id = {.Id}
 
 ### 隐式转换（预处理自动做）
 
-| 模板里写 | 自动转成 |
-|---|---|
-| `user_name like ?` | `user_name {like .user_name}` |
-| `user_name {like .user_name}` | `user_name like ?`（不会重复生成 like 关键字） |
-| `id in ?` | `id {in .id}` |
-| `id = {user_name}` | `id = {.UserName}`（列名→字段名） |
+SQL 里写了就能用——预处理帮你把这些简便写法转成模板调用：
+
+| 模板里写 | 自动转成 | 说明 |
+|---|---|---|
+| `列名 = ?` | `列名 = {param .列名}` | 最常用！等值条件自动参数化 |
+| `列名 = @列名` | `列名 = {param .列名}` | `@列名` 是 Go `database/sql` 的原生命名参数风格，预处理也支持 |
+| `@列名`（裸） | `{param .列名}` | 单独的 `@列名` 也会被识别 |
+| `列名 like ?` | `列名 {like .列名}` | `like` 是参数敏感函数——自动套 `%value%` |
+| `列名 in ?` | `列名 {in .列名}` | `in` 是参数敏感函数——自动展开 `(?, ?, ...)` |
+| `列名 {like .列名}` | 保持不变（不重复生成 like） | 直接写函数调用也支持 |
+| `列名 = {user_name}` | `列名 = {.UserName}`（列名→字段名） | 预处理自动做 snake_case → PascalCase 转换 |
+
+**重点示例：**
+
+```sql
+-- 用户写：
+SELECT * FROM user WHERE id = ? AND user_name like ? AND age = ?
+
+-- 预处理自动转成：
+SELECT * FROM user WHERE id = {param .id} AND user_name {like .user_name} AND age = {param .age}
+
+-- 最终执行等价于：
+SELECT * FROM user WHERE id = ? AND user_name like ? AND age = ?
+-- args = [1, "%Alice%", 25]
+```
+
+```sql
+-- 用户写（@列名 风格）：
+SELECT * FROM user WHERE id = @id AND name = @name
+
+-- 自动转成：
+SELECT * FROM user WHERE id = {param .id} AND name = {param .name}
+```
 
 ---
 

@@ -6,6 +6,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"reflect"
 	"runtime"
 	"strings"
 
@@ -16,6 +17,21 @@ import (
 	preparse "github.com/tianxinzizhen/tgsql/template/pre_parse"
 	"github.com/tianxinzizhen/tgsql/util"
 )
+
+// ArgsCollector 是 tgsql 传给自定义模板函数的参数收集器。
+// 当用户函数签名第一个参数是 ArgsCollector 时，executeTemplate 会自动注入
+// 一个闭包，调用它可把任意数量的值追加到当前执行的 SQL 参数列表。
+//
+// 用法示例:
+//
+//	tdb.AddTemplateFunc("geo", func(collect ArgsCollector, lng, lat float64) string {
+//	    collect(lng, lat)
+//	    return "ST_GeomFromText(POINT(? ?))"
+//	})
+//
+//	// SQL 模板: {geo .Lng .Lat}  →  渲染为 ST_GeomFromText(POINT(? ?))
+//	// 执行时 args 中自动追加 [lng, lat]
+type ArgsCollector func(values ...any) []any
 
 type TgenSql struct {
 	db                      *sql.DB
@@ -89,12 +105,83 @@ func NewTgenSql(sqlDB *sql.DB) *TgenSql {
 		sqlFunc:               make(template.FuncMap),
 		localFuncDataInfo:     load.NewLoadFuncDataInfo(),
 	}
-	// 注册默认模板函数（Parse 阶段需要函数存在）
+	// Parse 阶段需要函数名存在（Go template Parse 会校验），
+	// 这里放一份默认内置函数（Args 为空也没关系，Parse 不执行）。
+	// 执行时由 buildFuncMapForExecution 里的活版本（sf.BuildFuncMap）覆盖。
 	defaultFuncs := (&sqlFunc{fieldNameToColumnFunc: tdb.fieldNameToColumnFunc}).BuildFuncMap()
 	for k, v := range defaultFuncs {
 		tdb.sqlFunc[k] = v
 	}
 	return tdb
+}
+
+// buildFuncMapForExecution 每次执行构建最终的模板函数集合：
+//  1. 先拷贝 tdb.sqlFunc 里的用户自定义函数
+//  2. 对用户函数做 ArgsCollector 检测：如果第一个参数是 ArgsCollector 类型，
+//     用 reflect.MakeFunc 包装，注入当前执行的 sf.Args 追加闭包
+//  3. 最后用 sf.BuildFuncMap() 覆盖同名函数（内置函数必须优先，
+//     因为它们绑定的是当前 sf 的活 Args，而 NewTgenSql 时静态拷贝到
+//     tdb.sqlFunc 里的内置函数绑的是临时实例的空 Args）
+func (tdb *TgenSql) buildFuncMapForExecution(sf *sqlFunc) template.FuncMap {
+	result := make(template.FuncMap, len(tdb.sqlFunc)+len(sf.BuildFuncMap()))
+
+	// Step 1 + 2: 拷贝用户自定义函数 + ArgsCollector 包装
+	collectorType := reflect.TypeOf(ArgsCollector(func(...any) []any { return nil }))
+	for k, v := range tdb.sqlFunc {
+		result[k] = wrapWithArgsCollector(v, sf, collectorType)
+	}
+
+	// Step 3: 内置函数用活 Args 版本覆盖
+	for k, v := range sf.BuildFuncMap() {
+		result[k] = v
+	}
+
+	return result
+}
+
+// wrapWithArgsCollector 检测 fn 的第一个参数是否为 ArgsCollector 类型。
+// 是则用 reflect.MakeFunc 包一层：新签名去掉第一个 collector 参数
+// （模板只需要传业务参数），内部自动注入当前 sf.Args 追加闭包；
+// 否则原样返回 fn。
+//
+// 示例:
+//
+//	用户注册 func(c ArgsCollector, lng, lat float64) string { c(lng, lat); return "POINT(? ?)" }
+//	↓ 包装后暴露给模板 ↓
+//	func(lng, lat float64) string { ... }   （collector 在内部自动注入）
+func wrapWithArgsCollector(fn any, sf *sqlFunc, collectorType reflect.Type) any {
+	fnType := reflect.TypeOf(fn)
+	if fnType.Kind() != reflect.Func || fnType.NumIn() < 1 {
+		return fn
+	}
+	if fnType.In(0) != collectorType {
+		return fn
+	}
+
+	fnValue := reflect.ValueOf(fn)
+	appendArgs := reflect.ValueOf(ArgsCollector(func(values ...any) []any {
+		sf.Args = append(sf.Args, values...)
+		return sf.Args
+	}))
+
+	// 构建新签名：去掉第一个 collector 参数
+	newIn := make([]reflect.Type, fnType.NumIn()-1)
+	for i := 1; i < fnType.NumIn(); i++ {
+		newIn[i-1] = fnType.In(i)
+	}
+	newOut := make([]reflect.Type, fnType.NumOut())
+	for i := 0; i < fnType.NumOut(); i++ {
+		newOut[i] = fnType.Out(i)
+	}
+	newFnType := reflect.FuncOf(newIn, newOut, fnType.IsVariadic())
+
+	wrapped := reflect.MakeFunc(newFnType, func(args []reflect.Value) []reflect.Value {
+		fullArgs := make([]reflect.Value, 0, len(args)+1)
+		fullArgs = append(fullArgs, appendArgs)
+		fullArgs = append(fullArgs, args...)
+		return fnValue.Call(fullArgs)
+	})
+	return wrapped.Interface()
 }
 
 const (
@@ -122,7 +209,7 @@ func (tdb *TgenSql) ParseSql(tsql string) (*template.Template, error) {
 	sf := &sqlFunc{fieldNameToColumnFunc: tdb.fieldNameToColumnFunc}
 
 	return template.New("").Delims(tdb.leftDelim, tdb.rightDelim).
-		Funcs(template.FuncMap(sf.BuildFuncMap())).
+		Funcs(template.FuncMap(tdb.buildFuncMapForExecution(sf))).
 		Parse(preprocessedSQL)
 }
 
@@ -135,7 +222,7 @@ func (tdb *TgenSql) executeTemplate(ctx context.Context, rawSQL string, parms an
 	sf := &sqlFunc{fieldNameToColumnFunc: tdb.fieldNameToColumnFunc}
 	tpl, err := template.New("").
 		Delims(tdb.leftDelim, tdb.rightDelim).
-		Funcs(template.FuncMap(sf.BuildFuncMap())).
+		Funcs(template.FuncMap(tdb.buildFuncMapForExecution(sf))).
 		Parse(preprocessedSQL)
 	if err != nil {
 		return "", nil, err
@@ -163,7 +250,7 @@ func (tdb *TgenSql) templateBuild(templateSql *template.Template, op *funcExecOp
 	if err != nil {
 		return err
 	}
-	clone.Funcs(template.FuncMap(sf.BuildFuncMap()))
+	clone.Funcs(template.FuncMap(tdb.buildFuncMapForExecution(sf)))
 
 	sb := &strings.Builder{}
 	if err := clone.Execute(sb, op.param); err != nil {

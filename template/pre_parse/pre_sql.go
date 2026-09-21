@@ -39,6 +39,7 @@ type Config struct {
 	LeftDelim         string              // 左分隔符，默认 "{"
 	RightDelim        string              // 右分隔符，默认 "}"
 	ColumnToFieldName func(string) string // 列名到结构体字段名的转换函数
+	IsFunc            func(string) bool   // 判断一个名字是否是已知模板函数（内置 + 用户自定义）。为 nil 时用默认 templateFunctions
 }
 
 // DefaultConfig 返回默认配置
@@ -47,6 +48,7 @@ func DefaultConfig() Config {
 		LeftDelim:         "{",
 		RightDelim:        "}",
 		ColumnToFieldName: IdentityColumnToFieldName,
+		IsFunc:            func(name string) bool { return templateFunctions[name] },
 	}
 }
 
@@ -425,7 +427,7 @@ func transformTemplateContent(content string, cfg Config) string {
 	firstToken := strings.TrimSpace(tokens[0])
 
 	// 检查是否是关键字或函数调用
-	if templateKeywords[firstToken] || templateFunctions[firstToken] {
+	if templateKeywords[firstToken] || isFunc(cfg, firstToken) {
 		// 是关键字或函数调用，保持原样但处理内部的@符号和多字段
 		return transformFunctionArgs(content, cfg)
 	}
@@ -653,7 +655,7 @@ func transformFunctionArgs(content string, cfg Config) string {
 	}
 
 	firstToken := tokens[0]
-	if !templateFunctions[firstToken] {
+	if !isFunc(cfg, firstToken) {
 		return content
 	}
 
@@ -1344,10 +1346,19 @@ func peekTemplateFuncName(sql string, leftPos int, cfg Config) string {
 	name := strings.ToLower(firstToken.String())
 
 	// 必须是已知的模板函数名
-	if _, ok := templateFunctions[name]; ok {
+	if isFunc(cfg, name) {
 		return name
 	}
 	return ""
+}
+
+// isFunc 判断 name 是否是已知模板函数。优先用 cfg.IsFunc（可由外部注入用户自定义函数名），
+// 为 nil 时 fallback 到硬编码的 templateFunctions 表。
+func isFunc(cfg Config, name string) bool {
+	if cfg.IsFunc != nil {
+		return cfg.IsFunc(name)
+	}
+	return templateFunctions[name]
 }
 
 // scanBackwardKeyword 从 pos 往回扫描（跳过空白、非 identifier 字符），

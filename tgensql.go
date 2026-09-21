@@ -192,11 +192,24 @@ const (
 
 // preprocessConfig 返回当前 TgenSql 的预处理配置
 // 消除 ParseSql / BuildSQL / InitDBFunc 三处重复构造
+// IsFunc 注入内置 + 用户自定义函数名（预处理不会误把它们展开成 {param .xxx}）
 func (tdb *TgenSql) preprocessConfig() preparse.Config {
 	return preparse.Config{
 		LeftDelim:         tdb.leftDelim,
 		RightDelim:        tdb.rightDelim,
 		ColumnToFieldName: tdb.columnToFieldNameFunc,
+		IsFunc: func(name string) bool {
+			if _, ok := tdb.sqlFunc[name]; ok {
+				return true
+			}
+			// 兜底：硬编码内置表（即使 tdb.sqlFunc 为空也能识别）
+			builtin := map[string]bool{
+				"like": true, "liker": true, "likel": true,
+				"param": true, "in": true, "set": true, "where": true,
+				"json": true, "marshal": true, "comma": true, "sql": true,
+			}
+			return builtin[name]
+		},
 	}
 }
 

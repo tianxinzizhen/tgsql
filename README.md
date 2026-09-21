@@ -278,6 +278,8 @@ tdb.Delims("{{", "}}")
 
 ## 自定义模板函数
 
+### 基本用法
+
 ```go
 tdb.AddTemplateFunc("myquote", func(s string) string {
     return "`" + s + "`"
@@ -287,6 +289,47 @@ tdb.AddTemplateFunc("myquote", func(s string) string {
 tdb.AddAllTemplateFunc(template.FuncMap{
     "geo": func(lat, lng float64) string { return fmt.Sprintf("POINT(%f %f)", lng, lat) },
 })
+```
+
+### 带 `ArgsCollector` 的自定义函数（追加 SQL 参数）
+
+当自定义函数需要把值追加到 SQL `args` 列表时，让第一个参数声明为 `ArgsCollector` 类型：
+
+```go
+tdb.AddTemplateFunc("pt", func(collect tgsql.ArgsCollector, lng, lat float64) string {
+    collect(lng, lat)                 // 自动追加到当前 SQL args
+    return "ST_GeomFromText(POINT(? ?))"
+})
+```
+
+模板里正常调用：
+
+```sql
+SELECT ST_X(g) FROM geo_points WHERE location = {pt .Lng .Lat}
+```
+
+预处理后：`{pt .Lng .Lat}`（用户函数名不会被隐式展开成 `{param .pt}`）
+
+执行时：
+
+```
+SQL: SELECT ST_X(g) FROM geo_points WHERE location = ST_GeomFromText(POINT(? ?))
+args: [116.4074, 39.9042]
+```
+
+**关键点：**
+- `ArgsCollector` **不会出现在模板签名里**——模板只用写 `{pt .Lng .Lat}`，collector 在内部自动注入
+- 内置函数名（`like` / `in` / `param` / `set` / `where` ...）**优先于**用户注册的同名函数
+- 两种函数签名都可以（纯函数或带 collector）：框架会自动检测并适配
+
+### 函数签名对照表
+
+| 注册 | 模板调用 | SQL 渲染 | args 追加 |
+|---|---|---|---|
+| `func(s string) string` | `{hello .Name}` | `[Alice]` | 无 |
+| `func(ArgsCollector, float64, float64) string` | `{pt .Lng .Lat}` | `POINT(? ?)` | `[lng, lat]` |
+| `func(ArgsCollector, ...string) string` | ⚠️ 不支持 variadic 的 collector 风格 | | |
+| 用户注册 `func(like string) string` | `{like .Name}` | 仍然是内置 like 的结果（内置优先） | |
 ```
 
 ---
@@ -417,13 +460,14 @@ type GeoDao struct {
 ```
 tgsql/
 ├── tgensql.go                 TgenSql 主入口、NewTgenSql、BuildSQL、Execute
+│                              导出类型 ArgsCollector，buildFuncMapForExecution 合并用户函数
 ├── sql_func.go                内置模板函数（like/in/set/where/param/marshal...）
 ├── makefunc_context.go        InitDBFunc 核心：reflect.MakeFunc 把 //sql 字段填充成闭包
 ├── sql_option.go              funcExecOption 内部选项（param、sql、args、result）
 ├── sql_common_type.go         Operation 枚举、contextType/errorType/sqlResultType
 ├── sql_error.go / sql_recover.go / sql_tx.go / sql_record.go
 ├── template/pre_parse/       预处理引擎
-│   ├── pre_sql.go             {col}→{.Col}、方括号→{if}、隐式转换
+│   ├── pre_sql.go             {col}→{.Col}、方括号→{if}、隐式转换、IsFunc 可插拔
 │   ├── sql_lex.go             SQL 词法扫描（跳过引号内的内容）
 │   └── pre_sql_test.go        preprocessor 单测
 ├── load/                      从 Go 源码里提取 //sql 注解
@@ -445,7 +489,8 @@ tgsql/
     ├── student_dao_test.go    CRUD + 可选条件
     ├── query_test.go          BuildSQL 直接调用
     ├── geo_test.go            GeoPoint 参数转换器 + 结果扫描器
-    └── batch_insert_test.go   option{batch_insert:true}
+    ├── batch_insert_test.go   option{batch_insert:true}
+    └── custom_func_test.go    自定义模板函数 + ArgsCollector（7 个用例）
 ```
 
 ---
